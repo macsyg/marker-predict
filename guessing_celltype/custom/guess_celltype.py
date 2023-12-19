@@ -1,5 +1,3 @@
-
-# %%
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
@@ -14,7 +12,7 @@ import lightning.pytorch as pl
 
 DEVICE = 'cuda'
 
-CELL_DF_PATH = '../../eb_esb_train_nsclc2_df_bin.df'
+CELL_DF_PATH = '../../../eb_esb_train_nsclc2_df_bin.df'
 
 cell_df = pandas.read_csv(CELL_DF_PATH)
 
@@ -26,23 +24,32 @@ PANEL_1_MARKER_NAMES = ['MPO', 'HistoneH3', 'SMA', 'CD16', 'CD38',
 			 'CD33', 'Ki67', 'VISTA', 'CD40', 'CD4', 'CD14', 'Ecad', 'CD303',
 			 'CD206', 'cleavedPARP', 'DNA1', 'DNA2']
 
-start_dset = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
-start_dset = start_dset.type(torch.LongTensor)
+CELLTYPES = ['Tumor', 'CD8', 'plasma', 'Mural', 'CD4', 'DC', 'B', 'BnT', 
+			 'HLADR', 'MacCD163', 'Neutrophil', 'undefined', 'pDC', 'Treg', 'NK']
 
-mask = torch.randint(0, 39, (start_dset.shape[0],))
-# mask = torch.Tensor([39]).repeat((start_dset.shape[0],)).long()
 
-results = start_dset[torch.arange(start_dset.shape[0]), mask]
-# masked_dset = start_dset
-# masked_dset[torch.arange(start_dset.shape[0]), mask] = torch.full((start_dset.shape[0],), -1.0, dtype=torch.float64)
+def list_to_map(l):
+	mapp = {}
+	i = 0
+	for elem in l:
+		mapp[elem] = i
+		i += 1
+	return mapp
+
+celltype_to_id = list_to_map(CELLTYPES) 
+
+x = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
+x = x.type(torch.LongTensor)
+
+y = cell_df['celltypes'].values.tolist()
+y = torch.tensor([celltype_to_id[elem] for elem in y])
 
 class MarkerDataset(torch.utils.data.Dataset):
-	def __init__(self, x, y, mask):
+	def __init__(self, x, y):
 		super(MarkerDataset, self).__init__()
 		# store the raw tensors
 		self._x = x
 		self._y = y
-		self._mask = mask
 
 	def __len__(self):
 		# a DataSet must know it size
@@ -51,24 +58,21 @@ class MarkerDataset(torch.utils.data.Dataset):
 	def __getitem__(self, index):
 		x = self._x[index]
 		y = self._y[index]
-		mask = self._mask[index]
-		return x, y, mask
+		return x, y
 	
 
-inputs_train = start_dset[0:-1000]
-labels_train = results[0:-1000]
-ids_train = mask[0:-1000]
+inputs_train = x[0:-1000]
+labels_train = y[0:-1000]
 
-inputs_val = start_dset[-1000:]
-labels_val = results[-1000:]
-ids_val = mask[-1000:]
+inputs_val = x[-1000:]
+labels_val = y[-1000:]
 
-train_dset = MarkerDataset(inputs_train, labels_train, ids_train)
-val_dset = MarkerDataset(inputs_val, labels_val, ids_val)
+train_dset = MarkerDataset(inputs_train, labels_train)
+val_dset = MarkerDataset(inputs_val, labels_val)
 
-print(train_dset[0])
+print(train_dset[20])
 
-train_dataloader = DataLoader(train_dset, batch_size=256, shuffle=True, num_workers=64)
+train_dataloader = DataLoader(train_dset, batch_size=256, shuffle=True, num_workers=4)
 val_dataloader = DataLoader(val_dset, batch_size=64, shuffle=True)
 
 
@@ -89,21 +93,16 @@ class EmbedLayer(nn.Module):
 	def __init__(self, dic_size=40, embedding_dim=64, num_embeddings=6):
 			super().__init__()
 			self.embedding_dim = embedding_dim
+			self.positional_embedding = nn.Parameter(get_positional_encoding(dic_size, embedding_dim), requires_grad=False)
 			# self.name_embedding = nn.Parameter(torch.zeros(size=(dic_size, embedding_dim)))
 			self.value_embedding = nn.Embedding(num_embeddings, embedding_dim=embedding_dim)
-			self.mask_embedding = nn.Parameter(torch.rand(size=(embedding_dim,)))
-			self.positional_embedding = nn.Parameter(get_positional_encoding(dic_size, embedding_dim), requires_grad=False)
 
-	def forward(self, x, y):
+	def forward(self, x):
+			# name_embeds = self.name_embedding.repeat(x.shape[0], 1, 1)
 			name_embeds = self.positional_embedding.repeat(x.shape[0], 1, 1)
-			mask_embeds = self.mask_embedding.repeat(x.shape[0], 1)
-			# x[torch.arange(x.shape[0]), y] = 6
 			value_embeds = self.value_embedding(x)
-			# value_embeds[torch.arange(x.shape[0]), y, :] = torch.zeros(x.shape[0], self.embedding_dim).to(DEVICE)
-			value_embeds[torch.arange(x.shape[0]), y, :] = mask_embeds
 
 			return name_embeds + value_embeds
-			# return value_embeds
 
 # %%
 class FeedForward(torch.nn.Module):
@@ -156,25 +155,37 @@ class EncoderLayer(torch.nn.Module):
 		return x
 
 # %%
+
 class Classifier(torch.nn.Module):
-	def __init__(self, d_embed, num_bins):
+	def __init__(self, d_embed, dic_size, num_bins):
 		super().__init__()
 
-		# self.linear = nn.Linear(d_embed, num_bins)
-		# self.act = nn.GELU()
-		# self.norm = nn.LayerNorm(num_bins)
-		# self.softmax = torch.nn.LogSoftmax(dim=-1)
+		self.relu11 =  nn.ReLU()
+		self.relu12 =  nn.ReLU()
+		self.fc11 = nn.Linear(d_embed, 256)
+		self.fc12 = nn.Linear(256, 64)
+		self.fc13 = nn.Linear(64, 1)
 
-		self.dropout = nn.Dropout(0.1)
-		self.relu =  nn.ReLU()
-		self.fc1 = nn.Linear(d_embed, 256)
-		self.fc2 = nn.Linear(256, num_bins)
+		self.relu21 =  nn.ReLU()
+		self.fc21 = nn.Linear(dic_size, 64)
+		self.fc22 = nn.Linear(64, num_bins)
 		self.softmax = nn.LogSoftmax(dim=-1)
 
-
 	def forward(self, x):
-		# return self.softmax(self.norm(self.act(self.linear(x))))
-		return self.softmax(self.fc2(self.relu(self.fc1(x))))
+		x = self.fc11(x)
+		x = self.relu11(x)
+		x = self.fc12(x)
+		x = self.relu12(x)
+		x = self.fc13(x)
+
+		x = torch.squeeze(x)
+
+		x = self.fc21(x)
+		x = self.relu21(x)
+		x = self.fc22(x)
+		x = self.softmax(x)
+
+		return x
 
 # %%
 class Model(pl.LightningModule):
@@ -184,9 +195,17 @@ class Model(pl.LightningModule):
 		self.enc_layers = torch.nn.ModuleList([
 				EncoderLayer(d_embed, num_heads, d_ff) for i in range(num_layers)
 		])
-		self.fc = Classifier(d_embed, num_bins)
-		self.correct_outputs = []
-		self.dset_size = 0
+		self.fc = Classifier(d_embed, dic_size, num_bins)
+		self.num_bins = num_bins
+
+		# STATS #
+		self.correct_train_outputs = 0
+		self.first_preds = 0
+		self.correct_val_outputs = 0
+
+		self.train_dset_size = 0
+		self.val_dset_size = 0
+
 		self.save_hyperparameters()
 
 	def configure_optimizers(self):
@@ -196,10 +215,10 @@ class Model(pl.LightningModule):
 									lr=0.0001)
 		return optimizer
 
-	def perform_loss_step(self, batch, mode='train'):
-		inputt, labels, ids = batch
+	def training_step(self, batch, batch_idx):
+		inputt, labels = batch
 
-		embedded = self.embedding(inputt, ids)
+		embedded = self.embedding(inputt)
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
@@ -207,57 +226,63 @@ class Model(pl.LightningModule):
 				
 		preds_dist = self.fc(encoded)
 
-		# preds = torch.stack([results[i, ids[i], :] for i in range(ids.shape[0])])
-		preds_dist = preds_dist[torch.arange(inputt.shape[0]), ids, :]
-		preds = torch.argmax(preds_dist, dim=-1)		
+		preds = torch.argmax(preds_dist, dim=-1)
 		correct = torch.sum(preds == labels)
 
-		expected_dist = F.one_hot(labels, num_classes=6).float()
-		# loss = F.mse_loss(preds_dist, expected_dist) #TODO: tu ma być cross entropy loss
+		expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
 		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
-		# print(loss)
 
-		self.log(mode+'_loss', loss)
+		self.log('train_loss', loss)
 
-		self.correct_outputs.append(correct)
-		self.dset_size += inputt.shape[0]
+		self.first_preds += torch.sum(preds == torch.zeros(preds.shape[0], device = DEVICE))	
+		self.correct_train_outputs += correct
+		self.train_dset_size += inputt.shape[0]
 
 		return loss
 
-	def training_step(self, batch, batch_idx):
-		return self.perform_loss_step(batch, mode='train')
-
-	def validation_step(self, batch, batch_idx):
-		return self.perform_loss_step(batch, mode='val')
-	
 	def on_train_epoch_end(self):
 		# do something with all training_step outputs, for example:
-		epoch_mean = torch.stack(self.correct_outputs).sum() / self.dset_size
+		epoch_mean = self.correct_train_outputs / self.train_dset_size
 		self.log("training_epoch_acc", epoch_mean)
+		self.log("number_of_first_preds", self.first_preds)
 		# free up the memory
-		self.correct_outputs.clear()
-		self.dset_size = 0
+		self.correct_train_outputs = 0
+		self.train_dset_size = 0  
+		self.first_preds = 0  
 
-	def predict(self, x):
-		# pass "x" in batch
-		inputt, labels, ids = x
+	def validation_step(self, batch, batch_idx):
+		inputt, labels = batch
 
-		embedded = self.embedding(inputt, ids)
+		embedded = self.embedding(inputt)
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
-				encoded = enc_layer(encoded)
+			encoded = enc_layer(encoded)
 				
-		preds = self.fc(encoded)
-		preds = preds[torch.arange(inputt.shape[0]), ids, :]
-		preds = torch.argmax(preds, dim=-1)
-				
-		results = torch.sum(preds == labels)
-		print(results)        
-		
-model = Model(dic_size=40, num_bins=6, d_embed=128, d_ff=256, num_heads=4, num_layers=4)
+		preds_dist = self.fc(encoded)
 
-MAX_EPOCHS = 20
+		preds = torch.argmax(preds_dist, dim=-1)
+		correct = torch.sum(preds == labels)
+
+		expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
+		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
+
+		self.correct_val_outputs += correct
+		self.val_dset_size += inputt.shape[0]
+
+		return loss
+
+	def on_validation_epoch_end(self):
+		# do something with all training_step outputs, for example:
+		epoch_mean = self.correct_val_outputs / self.val_dset_size
+		self.log("validation_epoch_acc", epoch_mean)
+		# free up the memory
+		self.correct_val_outputs = 0
+		self.val_dset_size = 0  
+		
+model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
+
+MAX_EPOCHS = 10
 
 trainer = pl.Trainer(
 	max_epochs=MAX_EPOCHS,
@@ -269,9 +294,3 @@ trainer = pl.Trainer(
 trainer.fit(model, train_dataloader)
 
 trainer.validate(dataloaders=val_dataloader)
-
-
-
-
-
-

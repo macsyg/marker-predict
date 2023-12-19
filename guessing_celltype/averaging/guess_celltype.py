@@ -12,7 +12,7 @@ import lightning.pytorch as pl
 
 DEVICE = 'cuda'
 
-CELL_DF_PATH = '../../../../raid/immucan/immuw/atcel/data/eb_esb_train_nsclc2_df_bin.df'
+CELL_DF_PATH = '../../../eb_esb_train_nsclc2_df_bin.df'
 
 cell_df = pandas.read_csv(CELL_DF_PATH)
 
@@ -72,7 +72,7 @@ val_dset = MarkerDataset(inputs_val, labels_val)
 
 print(train_dset[20])
 
-train_dataloader = DataLoader(train_dset, batch_size=64, shuffle=True, num_workers=64)
+train_dataloader = DataLoader(train_dset, batch_size=256, shuffle=True, num_workers=4)
 val_dataloader = DataLoader(val_dset, batch_size=64, shuffle=True)
 
 
@@ -155,6 +155,7 @@ class EncoderLayer(torch.nn.Module):
 		return x
 
 # %%
+
 class Classifier(torch.nn.Module):
 	def __init__(self, d_embed, dic_size, num_bins):
 		super().__init__()
@@ -162,26 +163,19 @@ class Classifier(torch.nn.Module):
 		self.relu11 =  nn.ReLU()
 		self.relu12 =  nn.ReLU()
 		self.fc11 = nn.Linear(d_embed, 256)
-		self.fc12 = nn.Linear(256, 64)
-		self.fc13 = nn.Linear(64, 1)
-
-		self.relu21 =  nn.ReLU()
-		self.fc21 = nn.Linear(dic_size, 64)
-		self.fc22 = nn.Linear(64, num_bins)
+		self.fc12 = nn.Linear(256, 128)
+		self.fc13 = nn.Linear(128, num_bins)
 		self.softmax = nn.LogSoftmax(dim=-1)
 
 	def forward(self, x):
+
+		x = torch.mean(x, dim=1)
+
 		x = self.fc11(x)
 		x = self.relu11(x)
 		x = self.fc12(x)
 		x = self.relu12(x)
 		x = self.fc13(x)
-
-		x = torch.squeeze(x)
-
-		x = self.fc21(x)
-		x = self.relu21(x)
-		x = self.fc22(x)
 		x = self.softmax(x)
 
 		return x
@@ -197,20 +191,28 @@ class Model(pl.LightningModule):
 		])
 		self.fc = Classifier(d_embed, dic_size, num_bins)
 		self.num_bins = num_bins
-		self.correct_outputs = []
-		self.dset_size = 0
+
+		# STATS #
+		self.correct_train_outputs = 0
+		self.first_preds = 0
+		self.correct_val_outputs = 0
+
+		self.train_dset_size = 0
+		self.val_dset_size = 0
+
 		self.save_hyperparameters()
 
 	def configure_optimizers(self):
 		optimizer = torch.optim.AdamW(list(self.embedding.parameters()) + 
 									list(self.enc_layers.parameters()) +
-									list(self.fc.parameters()))
+									list(self.fc.parameters()),
+									lr=0.0001)
 		return optimizer
 
-	def perform_loss_step(self, batch, mode='train'):
-		input, labels = batch
+	def training_step(self, batch, batch_idx):
+		inputt, labels = batch
 
-		embedded = self.embedding(input)
+		embedded = self.embedding(inputt)
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
@@ -218,50 +220,91 @@ class Model(pl.LightningModule):
 				
 		preds_dist = self.fc(encoded)
 
-		preds = torch.argmax(preds_dist, dim=-1)	
+		preds = torch.argmax(preds_dist, dim=-1)
 		correct = torch.sum(preds == labels)
 
 		expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
 		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
 
-		self.log(mode+'_loss', loss)
+		self.log('train_loss', loss)
 
-		self.correct_outputs.append(correct)
-		self.dset_size += input.shape[0]
+		self.first_preds += torch.sum(preds == torch.zeros(preds.shape[0], device = DEVICE))	
+		self.correct_train_outputs += correct
+		self.train_dset_size += inputt.shape[0]
 
-		return loss, preds_dist
+		return loss
 
-	def training_step(self, batch, batch_idx):
-		train_loss, preds_dist = self.perform_loss_step(batch, mode='train')
-		# if batch_idx % 100 == 0:
-		# 	print(preds_dist[-1])
-
-		return train_loss
-
-	def validation_step(self, batch, batch_idx):
-		val_loss, _ = self.perform_loss_step(batch, mode='val')
-
-		return val_loss
-	
 	def on_train_epoch_end(self):
 		# do something with all training_step outputs, for example:
-		epoch_mean = torch.stack(self.correct_outputs).sum() / self.dset_size
+		epoch_mean = self.correct_train_outputs / self.train_dset_size
 		self.log("training_epoch_acc", epoch_mean)
+		self.log("number_of_first_preds", self.first_preds)
 		# free up the memory
-		self.correct_outputs.clear()
-		self.dset_size = 0     
-		
-model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
+		self.correct_train_outputs = 0
+		self.train_dset_size = 0  
+		self.first_preds = 0  
 
-MAX_EPOCHS = 10
+	def validation_step(self, batch, batch_idx):
+		inputt, labels = batch
 
-trainer = pl.Trainer(
-	max_epochs=MAX_EPOCHS,
-	accelerator="gpu",
-	# strategy='ddp_find_unused_parameters_true',
-	devices=[0, 2, 3]
-)
+		embedded = self.embedding(inputt)
 
-trainer.fit(model, train_dataloader)
+		encoded = embedded
+		for enc_layer in self.enc_layers:
+			encoded = enc_layer(encoded)
+				
+		preds_dist = self.fc(encoded)
 
-trainer.validate(dataloaders=val_dataloader)
+		preds = torch.argmax(preds_dist, dim=-1)
+		correct = torch.sum(preds == labels)
+
+		expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
+		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
+
+		self.correct_val_outputs += correct
+		self.val_dset_size += inputt.shape[0]
+
+		return loss
+
+	def on_validation_epoch_end(self):
+		# do something with all training_step outputs, for example:
+		epoch_mean = self.correct_val_outputs / self.val_dset_size
+		self.log("validation_epoch_acc", epoch_mean)
+		# free up the memory
+		self.correct_val_outputs = 0
+		self.val_dset_size = 0  
+
+	def predict(self, x):
+		# pass "x" in batch
+		inputt, labels = x
+
+		embedded = self.embedding(inputt)
+
+		encoded = embedded
+		for enc_layer in self.enc_layers:
+				encoded = enc_layer(encoded)
+				
+		preds_dist = self.fc(encoded)
+		preds = torch.argmax(preds_dist, dim=-1)
+				  
+		return preds
+
+if __name__ == "__main__":	
+
+	print("START")
+
+
+	model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
+
+	MAX_EPOCHS = 10
+
+	trainer = pl.Trainer(
+		max_epochs=MAX_EPOCHS,
+		accelerator="gpu",
+		# strategy='ddp_find_unused_parameters_true',
+		devices=[0]
+	)
+
+	trainer.fit(model, train_dataloader)
+
+	trainer.validate(dataloaders=val_dataloader)
