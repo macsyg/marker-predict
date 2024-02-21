@@ -134,7 +134,7 @@ class EncoderLayer(torch.nn.Module):
 		self.to_k = torch.nn.Linear(d_embed, d_embed)
 		self.to_v = torch.nn.Linear(d_embed, d_embed)
 
-		self.attention = torch.nn.MultiheadAttention(embed_dim=d_embed, num_heads=num_heads)
+		self.attention = torch.nn.MultiheadAttention(embed_dim=d_embed, num_heads=num_heads, batch_first=True)
 		self.ff = FeedForward(d_embed, d_ff)
 		self.norm1 = nn.LayerNorm(d_embed)
 		self.norm2 = nn.LayerNorm(d_embed)
@@ -288,7 +288,7 @@ trainer = pl.Trainer(
 	max_epochs=MAX_EPOCHS,
 	accelerator="gpu",
 	# strategy='ddp_find_unused_parameters_true',
-	devices=[0]
+	devices=[0, 2, 3]
 )
 
 trainer.fit(model, train_dataloader)

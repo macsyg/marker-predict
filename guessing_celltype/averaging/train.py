@@ -8,10 +8,6 @@ from torch.utils.data import DataLoader
 
 import pandas
 
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-
-import matplotlib.pyplot as plt
-
 import lightning.pytorch as pl
 
 from model_arch import Model
@@ -65,30 +61,33 @@ class MarkerDataset(torch.utils.data.Dataset):
 		x = self._x[index]
 		y = self._y[index]
 		return x, y
+	
+
+inputs_train = x[0:-1000]
+labels_train = y[0:-1000]
 
 inputs_val = x[-1000:]
 labels_val = y[-1000:]
 
-test_dset = MarkerDataset(inputs_val, labels_val)
+train_dset = MarkerDataset(inputs_train, labels_train)
+val_dset = MarkerDataset(inputs_val, labels_val)
 
-test_dataloader = DataLoader(test_dset, batch_size=64)
+print(train_dset[20])
 
-# model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
-model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_1/checkpoints/epoch=9-step=12710.ckpt")
+train_dataloader = DataLoader(train_dset, batch_size=256, shuffle=True, num_workers=4)
+val_dataloader = DataLoader(val_dset, batch_size=64, shuffle=True)
 
-preds_l = []
-# labels_l = []
-for batch in test_dataloader:
-	preds = model.predict(batch)
-	preds_l.append(preds)
-	# labels_l.append(labels)
+model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
 
-predss = torch.cat(preds_l, 0)
-labelss = torch.tensor(labels_val)
+MAX_EPOCHS = 10
 
-cm = confusion_matrix(labelss, predss)
+trainer = pl.Trainer(
+	max_epochs=MAX_EPOCHS,
+	accelerator="gpu",
+	# strategy='ddp_find_unused_parameters_true',
+	devices=[0, 2, 3]
+)
 
-disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-disp.plot()
+trainer.fit(model, train_dataloader)
 
-plt.savefig("./matrices/conf_m1.png")
+trainer.validate(dataloaders=val_dataloader)

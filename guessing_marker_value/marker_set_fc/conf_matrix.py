@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 import lightning.pytorch as pl
 
-from model_arch import Model
+from single_fc_arch import Model
 
 DEVICE = 'cuda'
 
@@ -30,32 +30,19 @@ PANEL_1_MARKER_NAMES = ['MPO', 'HistoneH3', 'SMA', 'CD16', 'CD38',
 			 'CD33', 'Ki67', 'VISTA', 'CD40', 'CD4', 'CD14', 'Ecad', 'CD303',
 			 'CD206', 'cleavedPARP', 'DNA1', 'DNA2']
 
-CELLTYPES = ['Tumor', 'CD8', 'plasma', 'Mural', 'CD4', 'DC', 'B', 'BnT', 
-			 'HLADR', 'MacCD163', 'Neutrophil', 'undefined', 'pDC', 'Treg', 'NK']
+start_dset = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
+start_dset = start_dset.type(torch.LongTensor)
 
-
-def list_to_map(l):
-	mapp = {}
-	i = 0
-	for elem in l:
-		mapp[elem] = i
-		i += 1
-	return mapp
-
-celltype_to_id = list_to_map(CELLTYPES) 
-
-x = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
-x = x.type(torch.LongTensor)
-
-y = cell_df['celltypes'].values.tolist()
-y = torch.tensor([celltype_to_id[elem] for elem in y])
+mask = torch.randint(0, 39, (start_dset.shape[0],))
+results = start_dset[torch.arange(start_dset.shape[0]), mask]
 
 class MarkerDataset(torch.utils.data.Dataset):
-	def __init__(self, x, y):
+	def __init__(self, x, y, mask):
 		super(MarkerDataset, self).__init__()
 		# store the raw tensors
 		self._x = x
 		self._y = y
+		self._mask = mask
 
 	def __len__(self):
 		# a DataSet must know it size
@@ -64,24 +51,26 @@ class MarkerDataset(torch.utils.data.Dataset):
 	def __getitem__(self, index):
 		x = self._x[index]
 		y = self._y[index]
-		return x, y
+		mask = self._mask[index]
+		return x, y, mask
 
-inputs_val = x[-1000:]
-labels_val = y[-1000:]
+inputs_val = start_dset[-1000:]
+labels_val = results[-1000:]
+ids_val = mask[-1000:]
 
-test_dset = MarkerDataset(inputs_val, labels_val)
-
-test_dataloader = DataLoader(test_dset, batch_size=64)
+test_dset = MarkerDataset(inputs_val, labels_val, ids_val)
+test_dataloader = DataLoader(test_dset, batch_size=64, shuffle=True)
 
 # model = Model(dic_size=40, num_bins=len(CELLTYPES), d_embed=128, d_ff=256, num_heads=4, num_layers=8)
-model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_1/checkpoints/epoch=9-step=12710.ckpt")
+model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_0/checkpoints/epoch=19-step=25420.ckpt")
+
 
 preds_l = []
-# labels_l = []
 for batch in test_dataloader:
-	preds = model.predict(batch)
+	_, labels, _ = batch
+	preds_dist = model.predict(batch)
+	preds = torch.argmax(preds_dist, dim=-1)
 	preds_l.append(preds)
-	# labels_l.append(labels)
 
 predss = torch.cat(preds_l, 0)
 labelss = torch.tensor(labels_val)

@@ -138,7 +138,7 @@ class EncoderLayer(torch.nn.Module):
 		# self.to_k = torch.nn.Linear(d_embed, d_embed)
 		# self.to_v = torch.nn.Linear(d_embed, d_embed)
 
-		self.attention = torch.nn.MultiheadAttention(embed_dim=d_embed, num_heads=num_heads)
+		self.attention = torch.nn.MultiheadAttention(embed_dim=d_embed, num_heads=num_heads, batch_first=True)
 		self.ff = FeedForward(d_embed, d_ff)
 		self.norm1 = nn.LayerNorm(d_embed)
 		self.norm2 = nn.LayerNorm(d_embed)
@@ -176,10 +176,10 @@ class Classifier(torch.nn.Module):
 
 		# x = torch.mean(x, dim=1)
 
-		# x = self.fc11(x)
-		# x = self.relu11(x)
-		# x = self.fc12(x)
-		# x = self.relu12(x)
+		x = self.fc11(x)
+		x = self.relu11(x)
+		x = self.fc12(x)
+		x = self.relu12(x)
 		x = self.fc13(x)
 		x = self.softmax(x)
 
@@ -191,13 +191,12 @@ class Model(pl.LightningModule):
 	def __init__(self, dic_size, num_bins, d_embed, d_ff, num_heads, num_layers):
 		super().__init__()
 		self.embedding = EmbedLayer(dic_size=dic_size, embedding_dim=d_embed, num_embeddings=num_bins)
-		# self.enc_layers = torch.nn.ModuleList([
-		# 		EncoderLayer(d_embed, num_heads, d_ff) for i in range(num_layers)
-		# ])
+		self.enc_layers = torch.nn.ModuleList([
+				EncoderLayer(d_embed, num_heads, d_ff) for i in range(num_layers)
+		])
 
-		encoder_layer = nn.TransformerEncoderLayer(d_model=d_embed, nhead=num_heads, batch_first = True)
-		self.enc_layers = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
+		# encoder_layer = nn.TransformerEncoderLayer(d_model=d_embed, nhead=num_heads, batch_first = True)
+		# self.enc_layers = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
 		self.fc = Classifier(d_embed, dic_size, num_bins)
 		self.num_bins = num_bins
@@ -224,22 +223,19 @@ class Model(pl.LightningModule):
 
 		embedded = self.embedding(inputt)
 
-		# encoded = embedded
-		# for enc_layer in self.enc_layers:
-		# 	encoded = enc_layer(encoded)
+		encoded = embedded
+		for enc_layer in self.enc_layers:
+			encoded = enc_layer(encoded)
 
-		encoded = self.enc_layers(embedded)
-
-		print(encoded.shape)
+		# encoded = self.enc_layers(embedded)
 				
 		preds_dist = self.fc(encoded[:,0,:])
-		# preds_dist = self.fc(encoded)
 
 		preds = torch.argmax(preds_dist, dim=-1)
 		correct = torch.sum(preds == labels)
 
-		# expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
-		loss = torch.nn.CrossEntropyLoss()(preds_dist, labels)
+		expected_dist = F.one_hot(labels, num_classes=self.num_bins).float()
+		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
 
 		self.log('train_loss', loss)
 
@@ -268,7 +264,7 @@ class Model(pl.LightningModule):
 		for enc_layer in self.enc_layers:
 			encoded = enc_layer(encoded)
 				
-		preds_dist = self.fc(encoded)
+		preds_dist = self.fc(encoded[:,0,:])
 
 		preds = torch.argmax(preds_dist, dim=-1)
 		correct = torch.sum(preds == labels)
@@ -299,7 +295,7 @@ if __name__ == "__main__":
 		max_epochs=MAX_EPOCHS,
 		accelerator="gpu",
 		# strategy='ddp_find_unused_parameters_true',
-		devices=[0]
+		devices=[0, 2, 3]
 	)
 
 	trainer.fit(model, train_dataloader)
