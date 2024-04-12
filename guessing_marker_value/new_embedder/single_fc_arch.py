@@ -18,12 +18,11 @@ class EmbedLayer(nn.Module):
 			self.embedding_dim = embedding_dim
 			self.bin_embedding = nn.Embedding(num_embeddings, embedding_dim=embedding_dim)
 			self.marker_embedding = nn.Embedding(dic_size, embedding_dim=embedding_dim)
-			self.pred_embedding = nn.Parameter(torch.zeros(self.embedding_dim), requires_grad=True)
 
 	def forward(self, bins, markers, missing_ids):
 			name_embeds = self.marker_embedding(markers)
+			print(bins)
 			value_embeds = self.bin_embedding(bins)
-			value_embeds[torch.arange(bins.shape[0]), missing_ids, :] = self.pred_embedding.repeat(bins.shape[0], 1)
 
 			return name_embeds + value_embeds
 
@@ -83,15 +82,17 @@ class EncoderLayer(torch.nn.Module):
 class Classifier(torch.nn.Module):
 	def __init__(self, d_embed, num_bins):
 		super().__init__()
-		self.dropout = nn.Dropout(0.1)
-		self.relu =  nn.ReLU()
+		self.relu = nn.ReLU()
 		self.fc1 = nn.Linear(d_embed, 256)
-		self.fc2 = nn.Linear(256, num_bins)
-		self.softmax = nn.LogSoftmax(dim=-1)
+		self.fc2 = nn.Linear(256, 256)
+		self.fc3 = nn.Linear(256, num_bins)
+		# self.softmax = nn.Softmax(dim=-1)
 
 	def forward(self, x):
-		# return self.softmax(self.norm(self.act(self.linear(x))))
-		return self.softmax(self.fc2(self.relu(self.fc1(x))))
+		x = self.fc1(x)
+		x = self.fc2(self.relu(x))
+		x = self.fc3(self.relu(x))
+		return x
 
 # %%
 class Model(pl.LightningModule):
@@ -103,6 +104,8 @@ class Model(pl.LightningModule):
 		])
 		self.fc = Classifier(d_embed, num_bins)
 
+		self.num_bins = num_bins
+		# self.amt_of_preds_in_epoch = []
 		self.correct_outputs = []
 		self.dset_size = 0
 		self.save_hyperparameters()
@@ -122,20 +125,23 @@ class Model(pl.LightningModule):
 		encoded = embedded
 		for enc_layer in self.enc_layers:
 			encoded = enc_layer(encoded)
-				
-		preds_dist = self.fc(encoded)
 
-		preds_dist = preds_dist[torch.arange(bins.shape[0]), missing_ids, :]
-		preds = torch.argmax(preds_dist, dim=-1)		
+		logits = self.fc(encoded)
+
+		logits = logits[torch.arange(bins.shape[0]), missing_ids, :]
+		print(logits)
+		preds = torch.argmax(logits, dim=-1)	
+
+		# amt_of_preds = torch.bincount(preds, minlength=7)
 		correct = torch.sum(preds == labels)
 
-		expected_dist = F.one_hot(labels, num_classes=6).float()
-		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
+		loss = torch.nn.CrossEntropyLoss()(logits, labels)
 
 		self.log(mode+'_loss', loss)
 
 		self.correct_outputs.append(correct)
 		self.dset_size += bins.shape[0]
+		# self.amt_of_preds_in_epoch.append(amt_of_preds)
 
 		return loss
 
@@ -147,9 +153,18 @@ class Model(pl.LightningModule):
 	
 	def on_train_epoch_end(self):
 		# do something with all training_step outputs, for example:
-		epoch_mean = torch.stack(self.correct_outputs).sum() / self.dset_size
+		correct_classified = torch.stack(self.correct_outputs).sum()
+		epoch_mean = correct_classified / self.dset_size
+
+		# amt_of_preds_in_e = torch.stack(self.amt_of_preds_in_epoch).sum(dim=0)
+
+		self.log("good", correct_classified)
+		self.log("dset_size", self.dset_size)
 		self.log("training_epoch_acc", epoch_mean)
 		# free up the memory
+		# print(amt_of_preds_in_e)
+
+		# self.amt_of_preds_in_epoch.clear()
 		self.correct_outputs.clear()
 		self.dset_size = 0
 

@@ -12,37 +12,21 @@ import lightning.pytorch as pl
 
 DEVICE = "cuda"
 
-def get_positional_encoding(seq_len, embedding_dim):
-	v = torch.arange(0, seq_len) * 1.0
-	base = (torch.ones(embedding_dim)/10000)
-	poww = torch.arange(0, embedding_dim) // 2 * 2.0 / embedding_dim
-	denom = torch.pow(base, poww)
-	res = torch.matmul(torch.reshape(v, (seq_len,1)), torch.reshape(denom, (1,embedding_dim)))
-
-	res[::2, :] = torch.sin(res[::2, :])
-	res[1::2, :] = torch.cos(res[1::2, :])
-	return res.clone().float()
-
 class EmbedLayer(nn.Module):
-	def __init__(self, dic_size=40, embedding_dim=64, num_embeddings=6):
+	def __init__(self, dic_size, embedding_dim, num_embeddings):
 			super().__init__()
 			self.embedding_dim = embedding_dim
-			# self.name_embedding = nn.Parameter(torch.zeros(size=(dic_size, embedding_dim)))
-			self.value_embedding = nn.Embedding(num_embeddings, embedding_dim=embedding_dim)
-			# self.mask_embedding = nn.Parameter(torch.rand(size=(embedding_dim,)))
-			self.positional_embedding = nn.Parameter(get_positional_encoding(dic_size, embedding_dim), requires_grad=True)
-			self.pred_embedding = nn.Parameter(torch.zeros(self.embedding_dim), requires_grad=False)
+			self.bin_embedding = nn.Embedding(num_embeddings, embedding_dim=embedding_dim)
+			self.marker_embedding = nn.Embedding(dic_size, embedding_dim=embedding_dim)
+			self.pred_embedding = nn.Parameter(torch.zeros(self.embedding_dim), requires_grad=True)
 
-	def forward(self, x, y):
-			name_embeds = self.positional_embedding.repeat(x.shape[0], 1, 1)
-			# mask_embeds = self.mask_embedding.repeat(x.shape[0], 1)
-			# x[torch.arange(x.shape[0]), y] = 6
-			value_embeds = self.value_embedding(x)
-			value_embeds[torch.arange(x.shape[0]), y, :] = self.pred_embedding.repeat(x.shape[0], 1)
-			# value_embeds[torch.arange(x.shape[0]), y, :] = mask_embeds
+	def forward(self, bins, markers, unav_ids):
+			name_embeds = self.marker_embedding(markers)
+			value_embeds = self.bin_embedding(bins)
+
+			value_embeds[:, unav_ids, :] = self.pred_embedding.repeat(bins.shape[0], unav_ids.shape[0], 1)
 
 			return name_embeds + value_embeds
-			# return value_embeds
 
 # %%
 class FeedForward(torch.nn.Module):
@@ -85,9 +69,6 @@ class EncoderLayer(torch.nn.Module):
 		q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
 
 		x_tmp1 = x
-
-		# print(self.attn_mask)
-
 		x, _ = self.attention(q, k, v, attn_mask = self.attn_mask)
 		x = x + x_tmp1
 		x = self.norm1(x)
@@ -103,22 +84,19 @@ class EncoderLayer(torch.nn.Module):
 class Classifier(torch.nn.Module):
 	def __init__(self, d_embed, num_bins):
 		super().__init__()
-
-		# self.linear = nn.Linear(d_embed, num_bins)
-		# self.act = nn.GELU()
-		# self.norm = nn.LayerNorm(num_bins)
-		# self.softmax = torch.nn.LogSoftmax(dim=-1)
-
-		self.dropout = nn.Dropout(0.1)
-		self.relu =  nn.ReLU()
+		self.relu = nn.ReLU()
 		self.fc1 = nn.Linear(d_embed, 256)
-		self.fc2 = nn.Linear(256, num_bins)
-		self.softmax = nn.LogSoftmax(dim=-1)
-
+		self.fc2 = nn.Linear(256, 256)
+		self.fc3 = nn.Linear(256, num_bins)
+		# self.softmax = nn.Softmax(dim=-1)
 
 	def forward(self, x):
-		# return self.softmax(self.norm(self.act(self.linear(x))))
-		return self.softmax(self.fc2(self.relu(self.fc1(x))))
+		x = self.fc1(x)
+		x = self.relu(x)
+		x = self.fc2(x)
+		x = self.relu(x)
+		x = self.fc3(x)
+		return x
 
 # %%
 class Model(pl.LightningModule):
@@ -142,29 +120,40 @@ class Model(pl.LightningModule):
 		return optimizer
 
 	def perform_loss_step(self, batch, mode='train'):
-		inputt, labels, ids = batch
+		bins, markers, unav_idss = batch
 
-		embedded = self.embedding(inputt, ids)
+		# print(bins.shape, markers.shape, unav_idss.shape)
+		unav_ids = unav_idss[0] #TODO czy da się zerować multiwymiarowo WYTŁUMACZENIE W torch_test
+
+		embedded = self.embedding(bins, markers, unav_ids)
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
 			encoded = enc_layer(encoded)
-				
+
 		preds_dist = self.fc(encoded)
 
 		# preds_dist_single_marker = preds_dist[torch.arange(inputt.shape[0]), ids, :]
 		# preds_single_marker = torch.argmax(preds_dist_single_marker, dim=-1)		
 		# correct = torch.sum(preds_single_marker == labels)
 
-		expected_dist = F.one_hot(inputt, num_classes=6).float()
-		loss = torch.nn.CrossEntropyLoss()(preds_dist, expected_dist)
+		missing_markers_preds_dist = preds_dist[:, unav_ids, :]
+		missing_markers_preds_dist_perm = missing_markers_preds_dist.permute(0,2,1)
+
+		missing_markers_labels = bins[:, unav_ids]
+
+		loss = torch.nn.CrossEntropyLoss()(missing_markers_preds_dist_perm, missing_markers_labels)
+
+		missing_markers_preds = torch.argmax(missing_markers_preds_dist, dim=-1)
+		correct = torch.sum(missing_markers_preds == missing_markers_labels)
+
 
 		self.log(mode+'_loss', loss)
 
-		# # STATS
-		# self.correct_outputs.append(correct)
-		# self.dset_size += inputt.shape[0]
-		# # STATS
+		# STATS
+		self.correct_outputs.append(correct)
+		self.dset_size += bins.shape[0] * unav_ids.shape[0]
+		# STATS
 
 		return loss
 
@@ -175,25 +164,25 @@ class Model(pl.LightningModule):
 		return self.perform_loss_step(batch, mode='val')
 	
 	def on_train_epoch_end(self):
-		# # do something with all training_step outputs, for example:
-		# epoch_mean = torch.stack(self.correct_outputs).sum() / self.dset_size
-		# self.log("training_epoch_acc", epoch_mean)
-		# # free up the memory
-		# self.correct_outputs.clear()
-		# self.dset_size = 0
+		# do something with all training_step outputs, for example:
+		epoch_mean = torch.stack(self.correct_outputs).sum() / self.dset_size
+		self.log("training_epoch_acc", epoch_mean)
+		# free up the memory
+		self.correct_outputs.clear()
+		self.dset_size = 0
 		pass
 
-	def predict(self, x):
+	def predict(self, batch):
 		# pass "x" in batch
-		inputt, labels, ids = x
+		bins, markers, unav_idss = batch
+		unav_ids = unav_idss[0] #TODO czy da się zerować multiwymiarowo WYTŁUMACZENIE W torch_test
 
-		embedded = self.embedding(inputt, ids)
+		embedded = self.embedding(bins, markers, unav_ids)
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
 				encoded = enc_layer(encoded)
 				
 		preds_dist = self.fc(encoded)
-		preds_dist = preds_dist[torch.arange(inputt.shape[0]), ids, :]
 				
 		return preds_dist

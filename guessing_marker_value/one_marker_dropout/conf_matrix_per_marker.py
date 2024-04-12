@@ -16,8 +16,6 @@ import lightning.pytorch as pl
 
 from single_fc_arch import Model
 
-import os
-
 DEVICE = 'cuda'
 
 CELL_DF_PATH = '../../../eb_esb_train_nsclc2_df_bin.df'
@@ -60,13 +58,7 @@ inputs_val = start_dset[-1000:]
 labels_val = results[-1000:]
 ids_val = mask[-1000:]
 
-model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_4/checkpoints/epoch=9-step=12710.ckpt")
-
-if not os.path.isdir("matrices"):
-	os.mkdir("matrices")
-
-if not os.path.isdir("matrices/matrix_per_marker"):
-	os.mkdir("matrices/matrix_per_marker")
+model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_1/checkpoints/epoch=19-step=25420.ckpt")
 
 for i in range(40):
 	print(i)
