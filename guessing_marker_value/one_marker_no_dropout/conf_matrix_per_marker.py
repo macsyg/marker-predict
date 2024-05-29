@@ -16,6 +16,8 @@ import lightning.pytorch as pl
 
 from single_fc_arch import Model
 
+import json
+
 DEVICE = 'cuda'
 
 CELL_DF_PATH = '../../../eb_esb_train_nsclc2_df_bin.df'
@@ -30,61 +32,65 @@ PANEL_1_MARKER_NAMES = ['MPO', 'HistoneH3', 'SMA', 'CD16', 'CD38',
 			 'CD33', 'Ki67', 'VISTA', 'CD40', 'CD4', 'CD14', 'Ecad', 'CD303',
 			 'CD206', 'cleavedPARP', 'DNA1', 'DNA2']
 
+dict_ids = {}
+with open('markers.json') as json_file:
+    dict_ids = json.load(json_file)
+
+markers_ids = [dict_ids[marker] for marker in PANEL_1_MARKER_NAMES]
+
 class MarkerDataset(torch.utils.data.Dataset):
-	def __init__(self, x, y, mask):
+	def __init__(self, bins, marker_pos, labels, missing_ids):
 		super(MarkerDataset, self).__init__()
 		# store the raw tensors
-		self._x = x
-		self._y = y
-		self._mask = mask
+		self._bins = bins
+		self._marker_poss = marker_pos
+		self._labels = labels
+		self._missing_ids = missing_ids
 
 	def __len__(self):
 		# a DataSet must know it size
-		return self._x.shape[0]
+		return self._bins.shape[0]
 
 	def __getitem__(self, index):
-		x = self._x[index]
-		y = self._y[index]
-		mask = self._mask[index]
-		return x, y, mask
+		bin_nr = self._bins[index]
+		marker_pos = self._marker_poss[index]
+		label = self._labels[index]
+		missing_id = self._missing_ids[index]
+		return bin_nr, marker_pos, label, missing_id
 
-start_dset = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
-start_dset = start_dset.type(torch.LongTensor)
+bins_dset = torch.tensor(cell_df[PANEL_1_MARKER_NAMES].values)
+bins_dset = bins_dset.long()
+markers_dset = torch.tensor(markers_ids).repeat(bins_dset.shape[0], 1)
 
-mask = torch.randint(0, 39, (start_dset.shape[0],))
-results = start_dset[torch.arange(start_dset.shape[0]), mask]
+bins_test = bins_dset[-1000:]
+marker_pos_test = markers_dset[-1000:]
 
-inputs_val = start_dset[-1000:]
-labels_val = results[-1000:]
-ids_val = mask[-1000:]
 
-model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_1/checkpoints/epoch=19-step=25420.ckpt")
+model = Model.load_from_checkpoint(checkpoint_path="./lightning_logs/version_25/checkpoints/epoch=9-step=57100.ckpt")
 
 for i in range(40):
 	print(i)
 
-	samples = torch.arange(start = start_dset.shape[0]-1000, end = start_dset.shape[0])
-	ids_val = (torch.ones(1000) * i).int()
+	samples = torch.arange(start = bins_dset.shape[0]-1000, end = bins_dset.shape[0])
+	missing_pos_test = (torch.ones(1000) * i).int()
+	labels_test = bins_dset[samples, missing_pos_test]
 
-	results = start_dset[samples, ids_val]
-	labels_val = results[-1000:]
-
-	test_dset = MarkerDataset(inputs_val, labels_val, ids_val)
+	test_dset = MarkerDataset(bins_test, marker_pos_test, labels_test, missing_pos_test)
 	test_dataloader = DataLoader(test_dset, batch_size=64)
 
 	preds_l = []
 	for batch in test_dataloader:
-		preds_dist = model.predict(batch)
+		preds_dist, _ = model.predict(batch)
 		preds = torch.argmax(preds_dist, dim=-1)
 		preds_l.append(preds)
 
 	predss = torch.cat(preds_l, 0)
 
-	cm = confusion_matrix(labels_val, predss)
+	cm = confusion_matrix(labels_test, predss)
 
 	disp = ConfusionMatrixDisplay(confusion_matrix=cm)
 	disp.plot()
 
 	plt.title(PANEL_1_MARKER_NAMES[i])
-	plt.savefig(f"./matrices/matrix_per_marker/conf_m{i}.png")
+	plt.savefig(f"./matrices/matrix_per_marker_v25/conf_m{i}.png")
 	plt.close()

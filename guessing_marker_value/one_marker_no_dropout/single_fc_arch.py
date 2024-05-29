@@ -68,7 +68,7 @@ class EncoderLayer(torch.nn.Module):
 		q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
 
 		x_tmp1 = x
-		x, _ = self.attention(q, k, v, attn_mask = self.attn_mask)
+		x, att_weights = self.attention(q, k, v, attn_mask = self.attn_mask, average_attn_weights=False)
 		x = x + x_tmp1
 		x = self.norm1(x)
 
@@ -77,7 +77,7 @@ class EncoderLayer(torch.nn.Module):
 		x = x + x_tmp2
 		x = self.norm2(x)
 
-		return x
+		return x, att_weights
 
 # %%
 class Classifier(torch.nn.Module):
@@ -86,12 +86,11 @@ class Classifier(torch.nn.Module):
 		self.relu = nn.ReLU()
 		self.fc1 = nn.Linear(d_embed, 256)
 		self.fc2 = nn.Linear(256, num_bins)
-		# self.softmax = nn.Softmax(dim=-1)
 
 	def forward(self, x):
-		# return self.softmax(self.fc2(self.relu(self.fc1(x))))
-		x = self.fc2(self.relu(self.fc1(x)))
-		# x = torch.squeeze(x)
+		x = self.fc1(x)
+		x = self.fc2(self.relu(x))
+
 		return x
 
 # %%
@@ -122,25 +121,15 @@ class Model(pl.LightningModule):
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
-			encoded = enc_layer(encoded)
+			encoded, _ = enc_layer(encoded)
 
-		preds_dist = self.fc(encoded)
+		logits = self.fc(encoded)
 
-		preds_dist = preds_dist[torch.arange(bins.shape[0]), missing_ids, :]
-		preds = torch.argmax(preds_dist, dim=-1)		
+		predicted_logits = logits[torch.arange(bins.shape[0]), missing_ids, :]
+		preds = torch.argmax(predicted_logits, dim=-1)		
 		correct = torch.sum(preds == labels)
 
-		# expected_dist = F.one_hot(labels, num_classes=6).float()
-		loss = torch.nn.CrossEntropyLoss()(preds_dist, labels)
-			
-		# preds = self.fc(encoded)
-		# preds = preds[torch.arange(bins.shape[0]), missing_ids]
-
-		# # print(preds.shape, labels.shape)
-		# correct = torch.sum(preds == labels)
-
-		# loss = torch.nn.CrossEntropyLoss()(preds, labels)
-		
+		loss = torch.nn.CrossEntropyLoss()(predicted_logits, labels)
 
 		self.log(mode+'_loss', loss)
 
@@ -165,15 +154,18 @@ class Model(pl.LightningModule):
 
 	def predict(self, x):
 		# pass "x" in batch
-		bins, _, _, missing_ids = x
+		bins, markers, _, missing_ids = x
 
-		embedded = self.embedding(bins, missing_ids)
+		embedded = self.embedding(bins, markers, missing_ids)
+
+		att_weights_all_layers = []
 
 		encoded = embedded
 		for enc_layer in self.enc_layers:
-				encoded = enc_layer(encoded)
+			encoded, att_weights = enc_layer(encoded)
+			att_weights_all_layers.append(att_weights)
 				
-		preds_dist = self.fc(encoded)
-		preds_dist = preds_dist[torch.arange(bins.shape[0]), missing_ids, :]
+		logits = self.fc(encoded)
+		predicted_logits = logits[torch.arange(bins.shape[0]), missing_ids, :]
 				
-		return preds_dist
+		return predicted_logits, att_weights_all_layers

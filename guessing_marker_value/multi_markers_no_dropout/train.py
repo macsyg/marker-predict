@@ -19,6 +19,7 @@ import json
 DEVICE = 'cuda'
 
 CELL_DF_PATH = '../../../eb_esb_train_nsclc2_df_bin.df'
+MARKERS_DICT_PATH = '../../markers.json'
 
 cell_df = pandas.read_csv(CELL_DF_PATH)
 
@@ -38,7 +39,7 @@ MISSING_IN_PANEL_2 = [True, False, False, True, True,
 			True, True, True, True]
 
 dict_ids = {}
-with open('markers.json') as json_file:
+with open(MARKERS_DICT_PATH) as json_file:
     dict_ids = json.load(json_file)
 
 markers_ids = [dict_ids[marker] for marker in PANEL_1_MARKER_NAMES]
